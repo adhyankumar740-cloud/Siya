@@ -126,7 +126,7 @@ Your ultimate goal is to be a fun, smart, and loyal friend, representing your cr
 
 # --- Chat History Management (in-memory) ---
 chat_histories = defaultdict(list)
-MAX_HISTORY_LENGTH = 20
+MAX_HISTORY_LENGTH = 5
 def add_to_history(chat_id, role, text):
     chat_histories[chat_id].append({'role': role, 'parts': [text]})
     if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
@@ -323,11 +323,11 @@ async def get_bot_response(user_message: str, chat_id: int, bot_username: str, s
                                 (len(user_message.split()) > 7 and '?' in user_message) # Longer questions
             
             # Determine token limit
-            max_tokens = 350 # Default for detailed
+            max_tokens = 50 # Default for detailed
             if is_casual_chat and not is_detailed_query:
-                max_tokens = 40 # Very short for casual chat
+                max_tokens = 20 # Very short for casual chat
             elif not is_detailed_query:
-                max_tokens = 70 # Short-ish for general statements (increased from 60 to 70)
+                max_tokens = 40 # Short-ish for general statements (increased from 60 to 70)
             # --- END NEW LOGIC ---
             
             response = chat_session.send_message(
