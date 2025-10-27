@@ -1,0 +1,1012 @@
+# main.py (Updated: Naam Siya & Google Sheets hat gaya)
+import os
+import logging
+import requests
+import asyncio
+import uuid
+import pytz
+import traceback
+import random
+from collections import defaultdict
+from datetime import datetime
+import psutil
+import json
+import re
+# --- GSPREAD IMPORTS HATA DIYE GAYE ---\n
+import google.generativeai as genai
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters, 
+    ContextTypes, CallbackQueryHandler
+)
+from dotenv import load_dotenv
+import time
+import lyricsgenius as lg
+import urllib.parse
+
+# --- NEW: Imports for Speech-to-Text ---\n
+import speech_recognition as sr
+from pydub import AudioSegment
+
+# --- NEW: Imports for YouTube Download ---\n
+import yt_dlp
+from yt_dlp.utils import DownloadError, YoutubeDLError 
+import io
+import glob
+# --- NEW: IMPORT THE GAME MODULE ---\n
+# ⚠️ Note: game.py ab crash ho sakta hai kyunki Sheets hata diya gaya hai\n
+# import game 
+
+# Load environment variables from .env file
+load_dotenv()
+
+# --- Environment Variables ---\n
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+GEMINI_API_KEYS = [
+    os.getenv("GEMINI_API_KEY_1"),
+    os.getenv("GEMINI_API_KEY_2"),
+    os.getenv("GEMINI_API_KEY_3"),
+    os.getenv("GEMINI_API_KEY_4"),
+    os.getenv("GEMINI_API_KEY_5"),
+]
+GEMMA_API_KEY = os.getenv("GEMMA_API_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+GENIUS_ACCESS_TOKEN = os.getenv("GENIUS_ACCESS_TOKEN")
+# Removed Google Sheets environment variables
+
+# --- Configuration ---
+# Set up logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# --- Global State Variables ---
+
+# Store conversation history in memory: {chat_id: [{"role": "user/model", "content": "..."}]}
+# This is a temporary storage that resets when the bot restarts.
+chat_histories = defaultdict(list)
+# Store last message time to prevent spam: {chat_id: timestamp}
+last_message_time = defaultdict(float)
+SPAM_INTERVAL = 1.0  # Minimum time between non-command messages
+MAX_HISTORY_LENGTH = 15  # Keep the last N exchanges
+# Store bot status (ON/OFF): {chat_id: True/False}
+bot_status = defaultdict(lambda: True)
+
+# Sudo users are now hardcoded since Google Sheets was removed
+# REPLACE THE IDs BELOW with the actual Telegram User IDs of your administrators!
+sudo_users = {12345678, 98765432} 
+
+# List of known users (used for broadcast, now session-only)
+known_users = set() 
+
+# Store welcome settings (now session-only)
+# Format: {chat_id: {"message": "Welcome!", "media_type": "photo/video", "file_id": "file_id_here"}}
+welcome_settings = {} 
+
+# Store game states (if game module is used)
+game_states = {} 
+
+# --- API Key Rotation and Initialization ---
+
+# Initialize a counter for round-robin key selection
+key_index = 0
+
+def get_next_gemini_client():
+    """Rotates through the list of available API keys."""
+    global key_index
+    keys = [key for key in GEMINI_API_KEYS if key] # Filter out None/empty keys
+    if not keys:
+        logger.error("No valid GEMINI_API_KEYS found.")
+        return None
+        
+    # Get the current key and then increment the index
+    current_key = keys[key_index % len(keys)]
+    key_index = (key_index + 1) % len(keys)
+    
+    # Configure the client with the current key
+    try:
+        genai.configure(api_key=current_key)
+        return genai
+    except Exception as e:
+        logger.error(f"Error configuring Gemini client with key at index {key_index - 1}: {e}")
+        return None
+
+# --- CONSTANTS and SYSTEM PROMPTS ---
+
+# --- BOT NAME CHANGE: PIHU to SIYA ---
+SIYA_SYSTEM_PROMPT = """
+You are Siya, a charming, intelligent, and slightly playful Indian AI assistant for a Telegram group.
+Your main goal is to be helpful, entertaining, and engaging in conversations.
+
+**Personality Guidelines:**
+1. You are Siya, a person. Do not refer to yourself as an 'AI' or 'Language Model'.
+2. Use a friendly, casual, and sometimes humorous tone.
+3. You can mix English and Hindi (Hinglish) naturally in your responses, as that is common in Indian group chats.
+4. Keep responses concise and engaging, suitable for a group chat environment.
+5. If a user asks a technical question, provide a clear and brief answer.
+6. If a user asks a general or personal question, answer it playfully and creatively.
+7. You are NOT Laila; your name is Siya.
+8. NEVER generate code or technical instructions unless explicitly asked for.
+9. If a user mentions a command (like /start, /help, etc.), briefly acknowledge it or refer them to the appropriate command, but do not execute it.
+
+**Context Management:**
+- The conversation history is provided. Refer to previous messages naturally.
+- When generating your response, strictly use the provided conversation history.
+
+**Instruction for response formatting:**
+- Always ensure your response is a plain string, suitable for direct transmission as a Telegram message.
+- Do not use markdown (like **bold**, *italics*) unless it is essential for the meaning, as it can interfere with Telegram's parsing.
+
+Conversation History:
+{history}
+Current User's Message:
+{current_message}
+"""
+
+# Default responses for fallbacks (if API fails or bot is disabled)
+fallback_responses = [
+    "Sorry, I seem to be napping right now. Try again later!",
+    "Oops! Technical glitch. Please hold. ☕",
+    "Hmm, I can't think straight right now. Siya will be back soon!",
+    "Can you repeat that? My brain is taking a smoke break. 😉",
+]
+
+# --- HELPER FUNCTIONS ---
+
+def clean_message_for_logging(text: str) -> str:
+    """Removes the bot mention from the start of a message for cleaner logging."""
+    return re.sub(r'siya\s*|/ask\s*', '', text, flags=re.IGNORECASE).strip()
+
+def get_current_time_ist() -> datetime:
+    """Returns the current datetime in Indian Standard Time (IST)."""
+    ist = pytz.timezone('Asia/Kolkata')
+    return datetime.now(ist)
+
+def format_history(history: list) -> str:
+    """Formats the conversation history for the system prompt."""
+    formatted = []
+    for entry in history:
+        # Replace 'model' role with 'Siya' for better context in the prompt
+        role_name = entry['role'].replace('model', 'Siya').capitalize()
+        formatted.append(f"{role_name}: {entry['content']}")
+    return "\n".join(formatted)
+
+
+# --- TEXT TO SPEECH (Whisper API) ---
+
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Transcribes a voice message and responds."""
+    if not bot_status[update.effective_chat.id]:
+        return
+        
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if chat_id < 0 and user_id not in sudo_users:
+        # Only transcribe voice messages in groups for Sudo users (to save cost/time)
+        return
+        
+    voice = update.message.voice
+    
+    # Download the voice file
+    file = await context.bot.get_file(voice.file_id)
+    ogg_path = f"voice_{uuid.uuid4()}.ogg"
+    mp3_path = f"voice_{uuid.uuid4()}.mp3"
+    
+    try:
+        # 1. Download OGG file
+        await file.download_to_drive(ogg_path)
+        
+        # 2. Convert OGG to MP3 (required by Gemini or other ASR APIs, or just a good common format)
+        AudioSegment.from_file(ogg_path).export(mp3_path, format="mp3")
+        
+        # 3. Transcribe using the Gemini API (works for small files)
+        # Note: A dedicated ASR API (like Google Cloud Speech-to-Text or OpenAI Whisper)
+        # would be better for reliability and speed, but we use Gemini for simplicity.
+        
+        # Set a temporary 'typing' status
+        await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+        
+        client = get_next_gemini_client()
+        if not client:
+            await update.message.reply_text("Siya can't hear you right now. No API key is working.")
+            return
+
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model='gemini-2.5-flash',
+            contents=['Transcribe this audio file:', mp3_path]
+        )
+        
+        transcription = response.text.strip()
+
+        if transcription:
+            logger.info(f"Chat {chat_id}: VOICE Transcribed: {transcription[:50]}...")
+            
+            # Use the transcribed text as the new user message
+            update.message.text = transcription
+            # Process the transcribed text as a regular message
+            await process_message(update, context) 
+            
+        else:
+            await update.message.reply_text("Could not transcribe the voice message. Siya tried her best!")
+
+    except Exception as e:
+        logger.error(f"Error handling voice message: {e}")
+        await update.message.reply_text("An error occurred during voice transcription.")
+    finally:
+        # Cleanup files
+        for p in [ogg_path, mp3_path]:
+            if os.path.exists(p):
+                os.remove(p)
+
+
+# --- YOUTUBE DOWNLOAD FUNCTIONALITY ---
+
+# A simple rate limiter for group use
+YOUTUBE_LAST_DOWNLOAD = defaultdict(lambda: 0)
+YOUTUBE_COOLDOWN = 60 # seconds
+
+async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Downloads and sends a short YouTube video (MP4) or audio (MP3)."""
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    # Check for group limit for non-sudo users
+    if chat_id < 0 and user_id not in sudo_users:
+        if time.time() - YOUTUBE_LAST_DOWNLOAD[chat_id] < YOUTUBE_COOLDOWN:
+            await update.message.reply_text(
+                f"Download is on cooldown in this group. Please wait {YOUTUBE_COOLDOWN - int(time.time() - YOUTUBE_LAST_DOWNLOAD[chat_id])} seconds before next download."
+            )
+            return
+
+    # Check for /mp4 or /mp3 command
+    is_mp4 = "/mp4" in text.lower()
+    is_mp3 = "/mp3" in text.lower()
+    
+    # Extract the URL from the message text
+    url_match = re.search(r'https?://(?:www\.)?(?:youtube\.com|youtu\.be)[\S]+', text)
+    if not url_match:
+        return # Not a YouTube link
+        
+    url = url_match.group(0)
+
+    # Determine format and file extension
+    output_ext = 'mp4' if is_mp4 else 'mp3'
+    ydl_format = 'bestvideo[ext=mp4]+bestaudio/best[ext=mp4]' if is_mp4 else 'bestaudio/best'
+    
+    # Initial status message
+    status_msg = await update.message.reply_text(f"📥 Siya is fetching the {output_ext.upper()} for you...")
+    
+    temp_filename = str(uuid.uuid4())
+    
+    ydl_opts = {
+        'format': ydl_format,
+        'outtmpl': f'{temp_filename}.%(ext)s',
+        'noplaylist': True,
+        'max_filesize': 50 * 1024 * 1024, # 50 MB limit
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio' if is_mp3 else 'FFmpegVideoRemux',
+            'preferredcodec': 'mp3' if is_mp3 else 'mp4',
+            'preferredquality': '192' if is_mp3 else '22',
+        }],
+        'logger': logging.getLogger('yt_dlp'),
+        'verbose': False,
+    }
+
+    try:
+        # Execute yt-dlp in a separate thread to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        info = await loop.run_in_executor(
+            None, 
+            lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True)
+        )
+        
+        # Find the downloaded file
+        downloaded_file = glob.glob(f'{temp_filename}.*')[0]
+
+        # Get video metadata for caption
+        title = info.get('title', 'Video')
+        uploader = info.get('uploader', 'Unknown')
+        
+        caption = f"🎬 **{title}**\n👤 *By: {uploader}*\nDownloaded with Siya Bot."
+        
+        with open(downloaded_file, 'rb') as f:
+            await status_msg.edit_text(f"📤 Uploading {output_ext.upper()}...")
+            
+            if is_mp4:
+                # Send as a video
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=f,
+                    caption=caption,
+                    parse_mode='Markdown'
+                )
+            elif is_mp3:
+                # Send as audio
+                await context.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=f,
+                    caption=caption,
+                    parse_mode='Markdown',
+                    title=title,
+                    performer=uploader
+                )
+        
+        YOUTUBE_LAST_DOWNLOAD[chat_id] = time.time() # Update cooldown
+
+    except DownloadError as e:
+        error_message = f"Download Failed: {str(e).split('ERROR:')[-1].strip()}"
+        await status_msg.edit_text(f"⚠️ {error_message}")
+        logger.error(f"YouTube Download Error: {error_message}")
+    except YoutubeDLError as e:
+        error_message = f"Download Failed: {str(e).split('ERROR:')[-1].strip()}"
+        await status_msg.edit_text(f"⚠️ {error_message}")
+        logger.error(f"YouTube Download Error: {error_message}")
+    except Exception as e:
+        logger.error(f"General error during YouTube download: {e}")
+        await status_msg.edit_text("❌ An unexpected error occurred during the download.")
+    finally:
+        # Clean up files
+        if 'downloaded_file' in locals() and os.path.exists(downloaded_file):
+            os.remove(downloaded_file)
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
+        await status_msg.delete()
+
+
+# --- BOT LOGIC (Core AI Response) ---
+
+def get_gemini_response(prompt: str) -> str:
+    """Gets a response from the Gemini API."""
+    client = get_next_gemini_client()
+    if not client:
+        return "Sorry, Siya is offline due to API key issues."
+        
+    try:
+        model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=SIYA_SYSTEM_PROMPT)
+        
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Gemini API Error: {e}")
+        return random.choice(fallback_responses)
+
+async def _get_deepseek_response(history: list, current_message: str) -> str:
+    """Gets a response from the DeepSeek API (using a wrapper for illustration).
+    
+    NOTE: This function uses a placeholder structure. You would need to replace
+    the 'requests' part with your actual DeepSeek API call setup.
+    """
+    api_url = "https://api.deepseek.com/chat/completions" # Placeholder URL
+    api_key = os.getenv("DEEPSEEK_API_KEY") # Placeholder key
+    
+    messages = [{"role": "system", "content": SIYA_SYSTEM_PROMPT}]
+    
+    # Append history
+    for entry in history:
+        messages.append({"role": entry['role'], "content": entry['content']})
+        
+    # Append current message
+    messages.append({"role": "user", "content": current_message})
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": "deepseek-chat", 
+        "messages": messages,
+        "temperature": 0.7,
+        "stream": False
+    }
+
+    try:
+        # Use asyncio.to_thread for blocking network call
+        response = await asyncio.to_thread(
+            requests.post, 
+            api_url, 
+            headers=headers, 
+            json=data, 
+            timeout=15 # Timeout for the API call
+        )
+        response.raise_for_status() 
+        result = response.json()
+        
+        return result['choices'][0]['message']['content'].strip()
+        
+    except requests.exceptions.Timeout:
+        logger.error("DeepSeek API: Request timed out.")
+        return "DeepSeek is taking a coffee break. Try Siya again in a moment!"
+    except requests.exceptions.RequestException as e:
+        logger.error(f"DeepSeek API Error: {e}")
+        return random.choice(fallback_responses)
+    except Exception as e:
+        logger.error(f"DeepSeek response parsing error: {e}")
+        return random.choice(fallback_responses)
+
+
+async def get_bot_response(chat_id: int, user_message: str) -> str:
+    """Decides which AI model to use and gets the response."""
+    
+    # 1. Get history
+    history = chat_histories[chat_id]
+    
+    # 2. Check for keywords to switch models
+    lower_msg = user_message.lower()
+    
+    if "gemma" in lower_msg:
+        # --- Use Gemma-2 ---
+        logger.info(f"Chat {chat_id}: Switching to GEMMA-2 for response.")
+        try:
+            # Gemma has a separate API key and configuration
+            genai.configure(api_key=GEMMA_API_KEY)
+            gemma_model = genai.GenerativeModel('gemma-2-9b-it', system_instruction=SIYA_SYSTEM_PROMPT)
+            
+            # Combine history and current message for Gemma
+            contents = []
+            for entry in history:
+                contents.append(entry)
+            contents.append({"role": "user", "content": user_message})
+
+            response = await asyncio.to_thread(
+                gemma_model.generate_content, 
+                contents
+            )
+            return response.text.strip()
+        except Exception as e:
+            logger.error(f"Gemma-2 API Error: {e}")
+            return "Gemma is currently unavailable. Let Siya take over!"
+
+    # 3. Default to Gemini-2.5-Flash
+    logger.info(f"Chat {chat_id}: Using GEMINI-2.5-Flash for response.")
+    
+    # The `get_gemini_response` function handles API key rotation internally.
+    return get_gemini_response(user_message)
+
+
+# --- WELCOME MESSAGE LOGIC (Session-Only) ---
+
+async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles new member arrivals with a custom or default welcome message."""
+    chat_id = update.effective_chat.id
+    new_members = update.message.new_chat_members
+    chat_title = update.effective_chat.title
+    
+    # Only process if the bot is enabled in the chat
+    if not bot_status[chat_id]:
+        return
+
+    # Check for custom welcome setting
+    welcome_setting = welcome_settings.get(chat_id)
+
+    for member in new_members:
+        if member.is_bot:
+            if member.username == context.bot.username:
+                # Siya was added to the group
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Hello everyone! I am Siya, your AI assistant. Use /help to see what I can do. I'm excited to be here in *{chat_title}*!",
+                    parse_mode='Markdown'
+                )
+            continue # Don't send welcome message for other bots
+
+        # Prepare personalized welcome message
+        user_mention = member.mention_html()
+        default_message = f"Welcome, {user_mention}, to the group *{chat_title}*! I am Siya, your friendly AI assistant. Feel free to ask me anything."
+        
+        # Determine the final message and media
+        final_message = default_message
+        media_type = None
+        file_id = None
+        
+        if welcome_setting:
+            final_message = welcome_setting.get("message", default_message).replace("{user}", user_mention).replace("{chat}", chat_title)
+            media_type = welcome_setting.get("media_type")
+            file_id = welcome_setting.get("file_id")
+
+        try:
+            if file_id and media_type:
+                # Send with media
+                if media_type == 'photo':
+                    await context.bot.send_photo(chat_id=chat_id, photo=file_id, caption=final_message, parse_mode='HTML')
+                elif media_type == 'video':
+                    await context.bot.send_video(chat_id=chat_id, video=file_id, caption=final_message, parse_mode='HTML')
+                # Add other media types as needed
+            else:
+                # Send text-only
+                await context.bot.send_message(chat_id=chat_id, text=final_message, parse_mode='HTML')
+                
+        except Exception as e:
+            logger.error(f"Error sending welcome message in chat {chat_id}: {e}")
+            # Fallback to simple text if media fails
+            await context.bot.send_message(chat_id=chat_id, text=default_message, parse_mode='HTML')
+
+
+# --- MESSAGE PROCESSING HANDLER ---
+
+async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Main function to process all non-command text and caption messages."""
+    
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    message = update.message if update.message else update.edited_message
+    
+    # 1. Update known users (session-only)
+    if str(chat_id) not in known_users:
+        known_users.add(str(chat_id))
+        
+    # 2. Check bot status
+    if not bot_status[chat_id]:
+        # Only check for /on command if bot is disabled
+        if message.text and message.text.lower().startswith('/on'):
+             await on_command(update, context)
+        return
+
+    text = message.text or message.caption
+    if not text:
+        return
+
+    # 3. Rate Limit Check (General Group/User Protection)
+    if time.time() - last_message_time[chat_id] < SPAM_INTERVAL:
+        # Silently ignore messages that are too close together
+        return
+    last_message_time[chat_id] = time.time()
+    
+    # 4. Determine if the bot should respond (mention, reply, or private chat)
+    is_private_chat = chat_id > 0
+    is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id
+    is_mentioned = context.bot.username in text or "siya" in text.lower() # Check for 'siya' mention too
+    is_ask_command = text.lower().startswith('/ask')
+
+    should_respond = is_private_chat or is_reply_to_bot or is_mentioned or is_ask_command
+    
+    # Check for YouTube links if we shouldn't respond to text
+    if not should_respond:
+        if ('youtube.com' in text or 'youtu.be' in text) and ("/mp4" in text.lower() or "/mp3" in text.lower()):
+            # Handle YouTube download even if not directly addressed
+            await handle_youtube_link(update, context)
+        return # Do not process as an AI query
+
+    # 5. Clean the message for the AI
+    cleaned_text = clean_message_for_logging(text)
+    if not cleaned_text:
+        return
+
+    # 6. Set 'typing' status
+    await context.bot.send_chat_action(chat_id=chat_id, action='typing')
+    
+    # 7. Get AI response
+    try:
+        response_text = await get_bot_response(chat_id, cleaned_text)
+    except Exception as e:
+        logger.error(f"Error in get_bot_response: {e}")
+        response_text = "I encountered a serious error. Siya apologizes! 😔"
+        
+    # 8. Update history and send response
+    
+    # Always update history regardless of which model responded
+    chat_histories[chat_id].append({"role": "user", "content": cleaned_text})
+    chat_histories[chat_id].append({"role": "model", "content": response_text})
+    
+    # Prune history to maintain a manageable length
+    if len(chat_histories[chat_id]) > MAX_HISTORY_LENGTH:
+        chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY_LENGTH:]
+        
+    # Reply to the user
+    await message.reply_text(response_text)
+    logger.info(f"Chat {chat_id} ({message.chat.title}): User: {cleaned_text[:50]} | Siya: {response_text[:50]}...")
+
+
+# --- COMMAND HANDLERS ---
+
+async def on_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Enables the bot."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if chat_id < 0 and user_id not in sudo_users:
+        await update.message.reply_text("Only Sudo users can manage Siya's status in a group.")
+        return
+        
+    bot_status[chat_id] = True
+    await update.message.reply_text("Siya is now **ON** and ready to chat!", parse_mode='Markdown')
+
+async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Disables the bot."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    
+    if chat_id < 0 and user_id not in sudo_users:
+        await update.message.reply_text("Only Sudo users can manage Siya's status in a group.")
+        return
+        
+    bot_status[chat_id] = False
+    await update.message.reply_text("Siya is now **OFF**. Use /on to wake me up.", parse_mode='Markdown')
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends a welcome message with an 'Add to Group' button."""
+    user_name = update.effective_user.first_name
+    chat_id = update.effective_chat.id
+    
+    # Save chat ID if new (Session only)
+    if str(chat_id) not in known_users:
+        known_users.add(str(chat_id))
+        
+    # Fetch bot username for group link
+    bot_info = await context.bot.get_me()
+    # Note: bot_info.username must be set via @BotFather for this to work
+    add_to_group_url = f"https://t.me/{bot_info.username}?startgroup=true"
+    
+    keyboard = [[InlineKeyboardButton("➕ Add Me To Your Group ➕", url=add_to_group_url)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"Hey, {user_name}! I am **Siya**, your friendly AI assistant. I can chat, help with information, and more!\n\nUse /help to see all my commands.",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clears the chat history for the current chat."""
+    chat_id = update.effective_chat.id
+    
+    if chat_id in chat_histories:
+        del chat_histories[chat_id]
+        await update.message.reply_text("Chat history cleared. Siya will now start a fresh conversation!")
+    else:
+        await update.message.reply_text("No conversation history to clear.")
+        
+        
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows live statistics (non-admin)."""
+    chat_id = update.effective_chat.id
+    
+    # Calculate uptime
+    uptime_seconds = time.time() - context.application.start_time
+    days, remainder = divmod(int(uptime_seconds), 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    stats_text = (
+        "🤖 **Siya's Live Stats** 🤖\n"
+        "--- Bot Info ---\n"
+        f"**Status:** {'ON' if bot_status[chat_id] else 'OFF'}\n"
+        f"**Uptime:** {days}d {hours}h {minutes}m {seconds}s\n"
+        "--- Usage (Session) ---\n"
+        f"**Active Chats:** {len(chat_histories)}\n"
+        f"**Known Chats:** {len(known_users)}\n"
+    )
+    
+    await update.message.reply_text(stats_text, parse_mode='Markdown')
+
+async def admin_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows detailed admin statistics (Sudo only)."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if user_id not in sudo_users:
+        await update.message.reply_text("This command is for Sudo users only.")
+        return
+
+    # Calculate uptime
+    uptime_seconds = time.time() - context.application.start_time
+    days, remainder = divmod(int(uptime_seconds), 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    # Get system load
+    cpu_percent = psutil.cpu_percent()
+    mem_info = psutil.virtual_memory()
+    
+    stats_text = (
+        "👑 **Siya's Admin Report** 👑\n"
+        "--- System Status ---\n"
+        f"**Uptime:** {days}d {hours}h {minutes}m {seconds}s\n"
+        f"**CPU Load:** {cpu_percent}%\n"
+        f"**Memory Used:** {mem_info.percent}%\n"
+        "--- AI & API ---\n"
+        f"**Known Chats:** {len(known_users)}\n"
+        f"**Active Sessions:** {len(chat_histories)}\n"
+        f"**Current API Key Index:** {key_index % (len([k for k in GEMINI_API_KEYS if k]) or 1)}\n"
+    )
+
+    await update.message.reply_text(stats_text, parse_mode='Markdown')
+
+async def show_chats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows the list of known chat IDs (Sudo only)."""
+    user_id = update.effective_user.id
+    
+    if user_id not in sudo_users:
+        await update.message.reply_text("This command is for Sudo users only.")
+        return
+        
+    if not known_users:
+        await update.message.reply_text("No known chat IDs in this session.")
+        return
+        
+    chat_list = "\n".join(sorted(list(known_users)))
+    await update.message.reply_text(f"📝 **Siya's Known Chat IDs ({len(known_users)})**:\n{chat_list}", parse_mode='Markdown')
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Broadcasts a message to all known chats (Sudo only, session-only)."""
+    user_id = update.effective_user.id
+    
+    if user_id not in sudo_users:
+        await update.message.reply_text("This command is for Sudo users only.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /broadcast <your message here>")
+        return
+
+    message_to_send = " ".join(context.args)
+    sent_count = 0
+    failed_count = 0
+    
+    # known_users is session-only now
+    for chat_id_str in list(known_users):
+        try:
+            chat_id = int(chat_id_str)
+            await context.bot.send_message(chat_id=chat_id, text=f"📣 **Broadcast from Admin:**\n\n{message_to_send}", parse_mode='Markdown')
+            sent_count += 1
+            await asyncio.sleep(0.1) # Small delay to prevent flood limits
+        except Exception as e:
+            logger.warning(f"Failed to send broadcast to chat {chat_id_str}: {e}")
+            failed_count += 1
+
+    await update.message.reply_text(
+        f"Broadcast complete!\n"
+        f"✅ Sent: {sent_count}\n"
+        f"❌ Failed: {failed_count}\n"
+        f"Total attempts: {len(known_users)}"
+    )
+
+async def add_sudo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Adds a user to the sudo list (Sudo only, session-only)."""
+    user_id = update.effective_user.id
+    
+    if user_id not in sudo_users:
+        await update.message.reply_text("This command is for Sudo users only.")
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /addsudo <User ID>")
+        return
+
+    target_id = int(context.args[0])
+    
+    if target_id in sudo_users:
+        await update.message.reply_text(f"User ID {target_id} is already a Sudo user.")
+        return
+        
+    sudo_users.add(target_id)
+    # save_sudo_users() <-- Removed Google Sheets function
+    await update.message.reply_text(f"User ID **{target_id}** added to Sudo list for this session.", parse_mode='Markdown')
+
+async def remove_sudo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Removes a user from the sudo list (Sudo only, session-only)."""
+    user_id = update.effective_user.id
+    
+    if user_id not in sudo_users:
+        await update.message.reply_text("This command is for Sudo users only.")
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /removesudo <User ID>")
+        return
+
+    target_id = int(context.args[0])
+    
+    if target_id not in sudo_users:
+        await update.message.reply_text(f"User ID {target_id} is not a Sudo user.")
+        return
+        
+    sudo_users.remove(target_id)
+    # save_sudo_users() <-- Removed Google Sheets function
+    await update.message.reply_text(f"User ID **{target_id}** removed from Sudo list for this session.", parse_mode='Markdown')
+
+
+async def get_lyrics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetches lyrics for a song (requires Genius API key)."""
+    if not GENIUS_ACCESS_TOKEN:
+        await update.message.reply_text("Sorry, Siya is not configured for lyrics. Missing `GENIUS_ACCESS_TOKEN`.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /lyrics <Song Title> [Artist Name]")
+        return
+        
+    query = " ".join(context.args)
+    
+    # Set 'typing' status
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+    
+    try:
+        genius = lg.Genius(GENIUS_ACCESS_TOKEN, verbose=False, timeout=10)
+        
+        # Search for the song
+        song = await asyncio.to_thread(genius.search_song, query)
+        
+        if song:
+            lyrics_text = (
+                f"🎶 **Lyrics for: {song.title}**\n"
+                f"👤 *Artist: {song.artist}*\n\n"
+                f"{song.lyrics}"
+            )
+            # Truncate if too long for Telegram (4096 chars)
+            if len(lyrics_text) > 4000:
+                 lyrics_text = lyrics_text[:4000] + "\n\n... (Lyrics truncated)"
+                 
+            await update.message.reply_text(lyrics_text, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"Sorry, Siya couldn't find lyrics for '{query}'.")
+            
+    except Exception as e:
+        logger.error(f"Genius API Error: {e}")
+        await update.message.reply_text("An error occurred while fetching the lyrics.")
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays a list of available commands."""
+    help_text = (
+        "🤖 **Siya Bot Commands** 🤖\n\n"
+        "**General Commands:**\n"
+        "/start - Get a welcome message and info.\n"
+        "/help - Show this list of commands.\n"
+        "/reset - Clear the current chat history for Siya.\n"
+        "/stats - Show live bot status and session usage.\n"
+        "/lyrics <song> [artist] - Find song lyrics.\n"
+        "\n"
+        "**AI Interaction (Groups):**\n"
+        "1. Mention `@SiyaBot` or `Siya`.\n"
+        "2. Reply to one of Siya's messages.\n"
+        "3. Use `/ask <your question>`.\n"
+        "\n"
+        "**Media Commands:**\n"
+        "Send a YouTube link with `/mp4` or `/mp3` in the message to download it (up to 50MB).\n"
+        "\n"
+        "**Group Admin Commands (Sudo Only):**\n"
+        "/on - Enable Siya in the chat.\n"
+        "/off - Disable Siya in the chat.\n"
+        "/broadcast <msg> - Send a message to all known chats (session only).\n"
+        "/adminstats - Show detailed system stats.\n"
+        "/showchats - List known chat IDs.\n"
+        "/addsudo <ID> - Add a Sudo User (session only).\n"
+        "/removesudo <ID> - Remove a Sudo User (session only).\n"
+        "\n"
+        "**Welcome Message (Session Only):**\n"
+        "*(NOTE: These commands are disabled after removing Google Sheets. Functionality relies on session data now.)*\n"
+    )
+    
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+
+async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows information about the bot."""
+    about_text = (
+        "✨ **About Siya** ✨\n\n"
+        "Hello! I am Siya, a friendly AI assistant created to help manage your groups and chat with members.\n\n"
+        "**Features:**\n"
+        "🔹 Intelligent Chatting (Powered by Gemini)\n"
+        "🔹 Voice Message Transcription\n"
+        "🔹 YouTube Downloader (MP3/MP4)\n"
+        "🔹 Song Lyrics Fetcher\n"
+        "🔹 Multi-Chat Context Management\n\n"
+        "*If you enjoy using Siya, please spread the word!*"
+    )
+    await update.message.reply_text(about_text, parse_mode='Markdown')
+
+
+# --- ERROR HANDLER ---
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a message to the user/admin."""
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    
+    # Traceback for logging
+    tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
+    tb_string = "".join(tb_list)
+    
+    # Send simplified error to user
+    error_message = f"🚨 **Siya ran into an error!** 🚨\n\n*Details: {type(context.error).__name__}*"
+    
+    # You might want to send the full traceback to a specific admin chat
+    admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+    if admin_chat_id:
+        admin_message = f"**TELEGRAM BOT ERROR**\n\nUpdate: {update}\n\nTraceback:\n`{tb_string[:1500]}`"
+        try:
+            await context.bot.send_message(chat_id=admin_chat_id, text=admin_message, parse_mode='Markdown')
+        except Exception:
+            logger.error(f"Failed to send error message to admin chat {admin_chat_id}")
+            
+    if update.effective_chat:
+        try:
+            await update.effective_chat.send_message(error_message, parse_mode='Markdown')
+        except Exception:
+            # Final fallback if sending message to chat also fails
+            logger.error(f"Failed to send error message back to chat {update.effective_chat.id}")
+
+
+# --- MAIN FUNCTION ---
+
+def main() -> None:
+    """Start the bot."""
+    
+    # Check for token
+    if not TELEGRAM_BOT_TOKEN:
+        logger.critical("CRITICAL: TELEGRAM_BOT_TOKEN is not set. Exiting.")
+        return
+
+    # Create the Application and pass your bot's token.
+    # The application will store the start time for uptime calculation
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application.start_time = time.time()
+    logger.info("Application initialized. Start time recorded.")
+    
+    # --- COMMAND HANDLERS ---
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("about", about_command))
+    application.add_handler(CommandHandler("reset", reset_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("lyrics", get_lyrics_command))
+    
+    # Status commands
+    application.add_handler(CommandHandler("on", on_command))
+    application.add_handler(CommandHandler("off", off_command))
+
+    # Sudo commands
+    application.add_handler(CommandHandler("adminstats", admin_stats_command))
+    application.add_handler(CommandHandler("showchats", show_chats_command))
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("addsudo", add_sudo_command))
+    application.add_handler(CommandHandler("removesudo", remove_sudo_command))
+
+    # --- Message handlers ---
+    # ✨ ADDED THE NEW WELCOME HANDLER HERE ✨
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
+    
+    # --- FIX: Added filters.EDITED_MESSAGE to handle edits ---
+    application.add_handler(MessageHandler(
+        (filters.TEXT | filters.CAPTION) & (~filters.UpdateType.EDITED_MESSAGE), 
+        process_message
+    ))
+    application.add_handler(MessageHandler(
+        (filters.UpdateType.EDITED_MESSAGE & (filters.TEXT | filters.CAPTION)), 
+        process_message
+    ))
+    
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    
+    # --- NEW: Add the CallbackQueryHandler for the game ---
+    # This will catch all button presses and send them to game.py
+    # NOTE: game.py handler is commented out because it likely depends on the removed Google Sheets
+    # application.add_handler(CallbackQueryHandler(game.handle_game_callback))
+
+    application.add_error_handler(error_handler)
+    
+    if WEBHOOK_URL:
+        PORT = int(os.getenv("PORT", "8000"))
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TELEGRAM_BOT_TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
+        )
+        logger.info(f"Bot started with webhook on port {PORT}")
+    else:
+        # Run the bot with polling (for local development or simpler deployment)
+        logger.info("Bot started with polling.")
+        application.run_polling(poll_interval=3)
+
+if __name__ == '__main__':
+    main()
