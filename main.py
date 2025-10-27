@@ -1353,7 +1353,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # Fetch bot username for group link
     bot_info = await context.bot.get_me()
-    add_to_group_url = f"https://t.me/Siya_aibot?startgroup=true"
+    add_to_group_url = f"https://t.me/The_Ziya_bot?startgroup=true"
     
     keyboard = [[InlineKeyboardButton("➕ Add Me To Your Group ➕", url=add_to_group_url)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2531,7 +2531,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         help_text += sudo_help_text
         
-    help_text += "\n\n✨ by Gopu ✨"
+    help_text += "\n\n✨ by Nishu ✨"
     
     await update.message.reply_text(help_text, parse_mode='Markdown', disable_web_page_preview=True)
     logger.info(f"[{update.effective_chat.id}] /help command used.")
@@ -2543,7 +2543,7 @@ async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "❤️ **About Pihu** ❤️\n\n" # Pihu
         "I am Pihu, an AI assistant . My purpose is to chat with you and provide answers to your questions.\n\n" # Pihu
         "My intelligence comes from a family of large language models, allowing me to provide helpful and accurate responses.\n\n"
-        "✨ **Owner**: Gopu\n"
+        "✨ **Owner**: Nishu\n"
         "✨ **Version**: 3.1 (Custom Welcome Update)\n\n" # Version updated
     )
     await update.message.reply_text(about_text, parse_mode='Markdown')
