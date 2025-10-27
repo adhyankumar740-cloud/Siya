@@ -2024,4 +2024,727 @@ async def paste_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         # The correct way is to send the text as the 'data' payload
         response = requests.post(url, data=text_to_paste.encode('utf-8'))
-        response.
+        response.raise_for_status() # Will raise an exception for bad status codes
+        
+        # Check if the response is JSON and has the expected structure
+        if "application/json" in response.headers.get("Content-Type", ""):
+            json_response = response.json()
+            if json_response.get("payload") and json_response["payload"].get("id"):
+                paste_id = json_response["payload"]["id"]
+                paste_url = f"https.spaceb.in/{paste_id}"
+                await update.message.reply_text(f"Text has been pasted successfully:\n{paste_url}")
+            else:
+                await update.message.reply_text(f"Failed to paste text. Unexpected API response.")
+                logger.error(f"Unexpected JSON response from Spacebin: {response.text}")
+        else:
+            await update.message.reply_text(f"Failed to paste text. Service returned a non-JSON response.")
+            logger.error(f"Non-JSON response from Spacebin: {response.text}")
+            
+    except requests.exceptions.RequestException as e:
+        await update.message.reply_text("An error occurred while connecting to the paste service.")
+        logger.error(f"Error in /paste command (RequestException): {e}")
+    except Exception as e:
+        await update.message.reply_text("An unexpected error occurred while pasting the text.")
+        logger.error(f"Error in /paste command: {e}", exc_info=True)
+
+
+# Fun Commands
+async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetches a random meme."""
+    url = "https.meme-api.com/gimme"
+    try:
+        response = requests.get(url).json()
+        if response and response.get('url'):
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=response['url'],
+                caption=f"**{response['title']}**\n_r/{response['subreddit']}_",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text("Couldn't fetch a meme right now, sorry!")
+    except Exception as e:
+        await update.message.reply_text("An error occurred while fetching a meme.")
+        logger.error(f"Error in /meme command: {e}")
+
+async def joke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tells a random joke."""
+    url = "https.v2.jokeapi.dev/joke/Any?blacklistFlags=nsfw,religious,political,racist,sexist,explicit&type=single"
+    try:
+        response = requests.get(url).json()
+        if not response['error']:
+            await update.message.reply_text(f"**Here's a joke for you:**\n\n_{response['joke']}_")
+        else:
+            await update.message.reply_text("I'm out of jokes for now, try again later!")
+    except Exception as e:
+        await update.message.reply_text("An error occurred while getting a joke.")
+        logger.error(f"Error in /joke command: {e}")
+
+async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetches a random inspirational quote."""
+    url = "https.api.quotable.io/random"
+    try:
+        response = requests.get(url).json()
+        await update.message.reply_text(f"**Here's a quote:**\n\n>_{response['content']}_\n\n— **{response['author']}**", parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text("An error occurred while fetching a quote.")
+        logger.error(f"Error in /quote command: {e}")
+
+async def roast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Roasts a user."""
+    roaster = update.effective_user.first_name
+    roast_text = random.choice(ROAST_MESSAGES)
+    
+    if update.message.reply_to_message:
+        target = update.message.reply_to_message.from_user.first_name
+        await update.message.reply_text(f"Hey {target}, {roast_text}")
+    else:
+        await update.message.reply_text(f"{roaster}, here's a thought for you: {roast_text}")
+
+async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Rates something on a scale of 1-10."""
+    if not context.args:
+        await update.message.reply_text("What should I rate? Example: `/rate my new haircut`")
+        return
+        
+    thing_to_rate = " ".join(context.args)
+    rating = random.randint(1, 10)
+    comment = ""
+    if rating <= 3:
+        comment = "Oof, not great."
+    elif rating <= 6:
+        comment = "Pretty average, I'd say."
+    elif rating <= 9:
+        comment = "Wow, that's really good!"
+    else:
+        comment = "Absolutely perfect! 10/10!"
+        
+    await update.message.reply_text(f"I'd rate **{thing_to_rate}** a... **{rating}/10**.\n{comment}")
+
+async def catfact_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gets a random cat fact."""
+    url = "https.catfact.ninja/fact"
+    try:
+        response = requests.get(url).json()
+        await update.message.reply_text(f"🐱 **Did you know?**\n\n_{response['fact']}_")
+    except Exception as e:
+        await update.message.reply_text("An error occurred while fetching a cat fact.")
+        logger.error(f"Error in /catfact command: {e}")
+
+async def dogfact_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gets a random dog fact."""
+    url = "https.dog.ceo/api/breeds/image/random" # Using this to get a fact and an image
+    try:
+        fact_res = requests.get("https.dogapi.dog/api/v2/facts").json()
+        img_res = requests.get("https.dog.ceo/api/breeds/image/random").json()
+        
+        fact = fact_res['data'][0]['attributes']['body']
+        img_url = img_res['message']
+        
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=img_url,
+            caption=f"🐶 **Did you know?**\n\n_{fact}_",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        await update.message.reply_text("An error occurred while fetching a dog fact.")
+        logger.error(f"Error in /dogfact command: {e}")
+
+async def advice_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gives a random piece of advice."""
+    url = "https.api.adviceslip.com/advice"
+    try:
+        response = requests.get(url).json()
+        await update.message.reply_text(f"💡 **Here's some advice:**\n\n_{response['slip']['advice']}_")
+    except Exception as e:
+        await update.message.reply_text("An error occurred while fetching advice.")
+        logger.error(f"Error in /advice command: {e}")
+
+
+# --- Message Processing Logic ---
+async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global total_messages_processed
+    chat_id = update.effective_chat.id
+    
+    # --- FIX: Handle both new and edited messages ---
+    message = update.message or update.edited_message
+    if not message:
+        # This should theoretically not be reachable due to filters, but it's a safe guard.
+        return
+
+    # --- NEW: Guessing game logic ---
+    if guessing_games[chat_id].get('active', False) and message.text and message.text.isdigit():
+        guess = int(message.text)
+        game = guessing_games[chat_id]
+        game['attempts'] += 1
+        
+        if guess < game['number']:
+            await message.reply_text("Too low! Try a higher number. ⬆️")
+        elif guess > game['number']:
+            await message.reply_text("Too high! Try a lower number. ⬇️")
+        else:
+            attempts = game['attempts']
+            await message.reply_text(f"🎉 **Correct!** You guessed the number **{game['number']}** in {attempts} attempts! 🎉\n\nUse /startgame to play again.")
+            logger.info(f"[{chat_id}] Game won. Number was {game['number']} in {attempts} tries.")
+            guessing_games[chat_id].clear()
+        return # Stop further processing if it was a game guess
+
+    global_bot_enabled = global_bot_status
+    chat_enabled = bot_status[chat_id]
+    is_private_chat = update.effective_chat.type == 'private'
+    
+    if message and message.text and message.text.startswith('/'):
+        # Check for auto-download right before returning for command
+        # This allows /youtube to work as intended, and auto-detection in text to work.
+        if ("youtube.com" in message.text or "youtu.be" in message.text) and not message.text.startswith('/youtube'):
+            threading.Thread(target=lambda: asyncio.run(handle_youtube_link(update, context, message.text)), daemon=True).start()
+        return
+    
+    if not global_bot_enabled or (not is_private_chat and not chat_enabled):
+        return
+    
+    bot_username = (await context.bot.get_me()).username
+    user_message = message.text or message.caption
+    user_id = update.effective_user.id
+    user_full_name = update.effective_user.full_name
+    
+    if str(chat_id) not in known_users:
+        known_users.add(str(chat_id))
+        # save_chat_id(chat_id) <-- Google Sheets function hata diya
+    
+    # --- Couple and GC Leaderboard user tracking ---
+    if not is_private_chat:
+        chat_members[chat_id][user_id] = user_full_name
+
+    if not user_message:
+        return
+    
+    # --- NEW: Automatic YouTube link detection in regular text ---
+    youtube_pattern = r'(https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[^\s]+)'
+    youtube_match = re.search(youtube_pattern, user_message)
+    if youtube_match:
+        url = youtube_match.group(0)
+        # Run in a new thread to prevent blocking
+        threading.Thread(target=lambda: asyncio.run(handle_youtube_link(update, context, url)), daemon=True).start()
+        # Continue to AI response only if the message is NOT just the link
+        if user_message.strip() == url.strip():
+            return
+    
+    # --- FIX: Removed AI-based pre-checks to save API quota ---
+    # if await is_name_query_ai(user_message):
+    #     await handle_name_query(update, context)
+    #     return
+        
+    is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id
+    is_mention = f"@{bot_username.lower()}" in user_message.lower() or "pihu" in user_message.lower() # 'laila' se 'pihu'
+    
+    should_use_ai = is_private_chat or is_reply_to_bot or is_mention
+    
+    # --- FIX: Removed AI-based fallback check to save API quota ---
+    # if not should_use_ai:
+    #     if await is_message_for_laila(user_message):
+    #         should_use_ai = True
+    #     else:
+    #         return
+            
+    if should_use_ai:
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            response_text = await get_bot_response(user_message, chat_id, bot_username, should_use_ai=True, update=update)
+            if response_text:
+                await message.reply_text(response_text, parse_mode='Markdown')
+                add_to_history(chat_id, 'user', user_message)
+                add_to_history(chat_id, 'model', response_text)
+                total_messages_processed += 1
+                logger.info(f"[{chat_id}] Sent response to {user_id}: {response_text[:50]}...")
+        except Exception as e:
+            logger.error(f"Error processing message for chat {chat_id}: {e}", exc_info=True)
+            try:
+                await message.reply_text("An unexpected error occurred. Please try again later.")
+            except Exception as reply_e:
+                logger.error(f"Failed to send error reply: {reply_e}")
+
+# --- NEW: Speech-to-Text Handler ---
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles voice messages by converting them to text and processing them."""
+    chat_id = update.effective_chat.id
+    
+    # Bot logic check
+    global_bot_enabled = global_bot_status
+    chat_enabled = bot_status[chat_id]
+    is_private_chat = update.effective_chat.type == 'private'
+    if not global_bot_enabled or (not is_private_chat and not chat_enabled):
+        return
+
+    # --- FIX: Get message object ---
+    message = update.message or update.edited_message
+    if not message or not message.voice:
+        return
+
+    file_id = message.voice.file_id
+    
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        
+        # 1. Download the voice file
+        voice_file = await context.bot.get_file(file_id)
+        ogg_path = f"{file_id}.ogg"
+        # Download needs to be awaited
+        await voice_file.download_to_drive(ogg_path)
+
+        # 2. Convert OGG to WAV
+        wav_path = f"{file_id}.wav"
+        # Blocking operation, run in thread
+        audio = await asyncio.to_thread(AudioSegment.from_ogg, ogg_path)
+        await asyncio.to_thread(audio.export, wav_path, format="wav")
+
+        # 3. Transcribe WAV to text
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_path) as source:
+            # Blocking operation, run in thread
+            audio_data = await asyncio.to_thread(recognizer.record, source)
+        
+        # Blocking operation, run in thread
+        transcribed_text = await asyncio.to_thread(recognizer.recognize_google, audio_data)
+        logger.info(f"[{chat_id}] Transcribed voice message: '{transcribed_text}'")
+
+        # 4. Process the transcribed text like a regular message
+        if transcribed_text:
+            bot_username = (await context.bot.get_me()).username
+            # We treat voice messages as direct mentions to the bot
+            response_text = await get_bot_response(transcribed_text, chat_id, bot_username, should_use_ai=True, update=update)
+            if response_text:
+                await message.reply_text(response_text, parse_mode='Markdown')
+                add_to_history(chat_id, 'user', transcribed_text)
+                add_to_history(chat_id, 'model', response_text)
+
+    except sr.UnknownValueError:
+        await message.reply_text("Sorry, I couldn't understand the audio. 😕")
+    except sr.RequestError as e:
+        await message.reply_text("Sorry, my speech recognition service is down. Please try again later.")
+        logger.error(f"Speech recognition request error: {e}")
+    except FileNotFoundError:
+        # This error happens if ffmpeg is not installed
+        await message.reply_text("Sorry, I can't process voice messages right now. The `ffmpeg` tool might be missing on the server.")
+        logger.error("ffmpeg not found. Please install it to enable voice message processing.")
+    except Exception as e:
+        await message.reply_text("An error occurred while processing your voice message.")
+        logger.error(f"Error processing voice message: {e}", exc_info=True)
+    finally:
+        # 5. Clean up temporary files (Blocking operations, run in thread)
+        def cleanup(ogg, wav):
+            if os.path.exists(ogg): os.remove(ogg)
+            if os.path.exists(wav): os.remove(wav)
+
+        if 'ogg_path' in locals() and 'wav_path' in locals():
+            # Await the cleanup thread
+            await asyncio.to_thread(cleanup, ogg_path, wav_path)
+
+# ------------------------------------------------------------------
+# --- ✨ REWRITTEN: WELCOME MESSAGE FOR NEW GROUP MEMBERS ✨ ---
+# --- (Custom welcome functionality hata di gayi) ---
+# ------------------------------------------------------------------
+async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends a stylish welcome message (default only) when new members join."""
+    
+    chat = update.effective_chat
+    chat_id = str(chat.id)
+    
+    # --- FIX: Get message object ---
+    message = update.message or update.edited_message
+    if not message:
+        return
+
+    # --- Define Default Welcome Settings ---
+    # Using the reliable photo file_id from /start as the default
+    DEFAULT_WELCOME_MEDIA_ID = 'AgACAgUAAxkBAAIIKGigVdAK07aRr9QiXpRalahcPO2pAAIL0DEblXUBVSY5LS31XxPSAQADAgADeAADNgQ'
+    DEFAULT_WELCOME_MEDIA_TYPE = 'photo'
+    DEFAULT_WELCOME_MESSAGE_TEMPLATE = (
+        "🎉 **Welcome to {group_name}!** 🎉\n\n"
+        "Hey {user_mention}, we're thrilled to have you join us! We hope you have a great time here.\n\n"
+        "Here are your details:\n"
+        "  •  **Name**: `{user_name}`\n"
+        "  •  **Telegram ID**: `{user_id}`\n\n"
+        "Feel free to introduce yourself and dive into the conversation! 😊\n"
+        "You can also start playing the new game with `/game`!"
+    )
+
+    # --- Sirf Default settings ka istemaal hoga ---
+    welcome_message_template = DEFAULT_WELCOME_MESSAGE_TEMPLATE
+    welcome_media_id = DEFAULT_WELCOME_MEDIA_ID
+    welcome_media_type = DEFAULT_WELCOME_MEDIA_TYPE
+
+    for member in message.new_chat_members:
+        # Don't welcome the bot itself
+        if member.id == context.bot.id:
+            continue
+
+        # --- Create Placeholders ---
+        user_mention = f"[{member.full_name}](tg://user?id={member.id})"
+        
+        # --- Format the Caption ---
+        try:
+            welcome_caption = welcome_message_template.format(
+                user_mention=user_mention,
+                user_name=member.full_name,
+                user_id=member.id,
+                group_name=chat.title
+            )
+        except KeyError as e:
+            # Yeh fallback hai agar default template mein bhi galti ho
+            logger.warning(f"Invalid placeholder {e} in default welcome. Using basic message.")
+            welcome_caption = f"Welcome {user_mention} to {chat.title}!"
+
+        # --- Send the Media and Caption ---
+        try:
+            if welcome_media_type == 'photo':
+                await context.bot.send_photo(
+                    chat_id=chat.id,
+                    photo=welcome_media_id,
+                    caption=welcome_caption,
+                    parse_mode='Markdown'
+                )
+            elif welcome_media_type == 'video':
+                await context.bot.send_video(
+                    chat_id=chat.id,
+                    video=welcome_media_id,
+                    caption=welcome_caption,
+                    parse_mode='Markdown'
+                )
+            elif welcome_media_type == 'animation':
+                await context.bot.send_animation(
+                    chat_id=chat.id,
+                    animation=welcome_media_id,
+                    caption=welcome_caption,
+                    parse_mode='Markdown'
+                )
+            else:
+                # Fallback if media type is unknown or invalid
+                raise ValueError("Invalid media type")
+
+            logger.info(f"Sent welcome message to {member.full_name} (ID: {member.id}) in group '{chat.title}' (ID: {chat.id}).")
+        
+        except Exception as e:
+            logger.error(f"Failed to send welcome media (ID: {welcome_media_id}) to chat {chat.id}. Error: {e}", exc_info=True)
+            # --- Fallback to Text-Only Message ---
+            try:
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=welcome_caption,
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Sent FALLBACK welcome text to {member.full_name} in group {chat.id}.")
+            except Exception as text_e:
+                logger.error(f"Failed to send fallback welcome text to chat {chat.id}. Error: {text_e}")
+
+
+# ------------------------------------------------------------------
+# --- ✨ CUSTOM WELCOME ADMIN COMMANDS HATA DIYE GAYE ✨ ---
+# --- (set_welcome_message_command, set_welcome_media_command, reset_welcome_command)
+# ------------------------------------------------------------------
+
+
+# --- REVAMPED HELP Command (with new welcome commands) ---
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = str(update.effective_user.id)
+    is_sudo = user_id == str(BROADCAST_ADMIN_ID) or user_id in sudo_users
+
+    help_text = (
+        "❤️ **Pihu Bot Commands** ❤️\n\n" # Pihu
+        "Here's a list of everything I can do!\n\n"
+        
+        "**💬 General Commands**\n"
+         "`/start` - Start a conversation with me.\n"
+        "`/help` - Shows this help message.\n"
+        "`/about` - Learn more about me.\n"
+        "`/stats` - Check my live performance status.\n"
+        "`/id` - Get your User ID and the current Chat ID.\n\n"
+
+        "**🎨 Media & AI Commands**\n"
+        "`/gen <prompt>` - Generate an AI image from text.\n"
+        "`/img <query>` - Search for a high-quality photo.\n"
+        "`/lyrics <song>` - Find the lyrics for a song.\n"
+        "`/youtube <link>` - Download a YouTube video.\n"
+        "  -> *Tip: Just send a YouTube link and I'll download it automatically!* 😉\n\n"
+        
+        "**💡 Utility Commands**\n"
+        "`/tr <lang> <text>` - Translate text (or reply).\n"
+        "`/weather <city>` - Get the current weather.\n"
+        "`/crypto <symbol>` - Check cryptocurrency prices. (e.g., `/crypto bitcoin`)\n"
+        "`/define <word>` - Get the definition of a word.\n"
+        "`/ud <term>` - Search Urban Dictionary.\n"
+        "`/qr <text>` - Generate a QR code.\n"
+        "`/shorten <url>` - Shorten a long URL.\n"
+        "`/paste` - Reply to a message to paste it online.\n\n"
+        
+        "**🎮 Fun & Games**\n"
+        "`/meme` - Get a random meme.\n"
+        "`/joke` - I'll tell you a joke.\n"
+        "`/quote` - Get an inspirational quote.\n"
+        "`/advice` - Get a random piece of advice.\n"
+        "`/catfact` - Get a random cat fact.\n"
+        "`/dogfact` - Get a random dog fact with a picture.\n"
+        "`/couple` - Select a random couple in the group.\n"
+        "`/truth` - Get a random truth question.\n"
+        "`/dare` - Get a random dare.\n"
+        "`/slap` - Slap a user (reply to their message).\n"
+        "`/roast` - Roast a user (reply to their message).\n"
+        "`/rate- rate any thing`\n"
+        "`/roll` - Roll a dice (1-6).\n"
+        "`/coinflip` - Flip a coin.\n"
+        "`/startgame` - Start a number guessing game.\n"
+        "`/stopgame` - Stop the current game.\n\n"
+        
+        "**💸 Economy & Family Game (NEW!)**\n"
+        "`/game` or `/profile` - Open your main game menu.\n"
+        "`/leaderboard` - Show the global richest players.\n"
+        "`/marry` - Reply to a user to propose marriage.\n"
+        "`/adopt` - Reply to a user to adopt them.\n"
+        "`/divorce` - End your current marriage.\n"
+        "  -> *All other actions (work, farm, shop) are inside the /game menu!*\n\n"
+        
+        "**🔒 Admin Commands (For Group Admins)**\n"
+        "`/on` | `/off` - Turn me on or off in the group.\n"
+        "`/reboot` - Reboot me for the group.\n"
+        "`/reset` - Clear my conversation history for the group.\n"
+        "`/ban` | `/unban` - Ban or unban a user (reply).\n"
+        "`/kick` - Kick a user from the group (reply).\n"
+        "`/mute` | `/unmute` - Mute or unmute a user (reply).\n"
+        # --- Custom Welcome commands hata diye gaye ---
+    )
+
+    if is_sudo:
+        sudo_help_text = (
+            "\n👑 **SUDO / OWNER Commands** 👑\n"
+            "`/poweron` | `/poweroff` - Turn me on/off globally.\n"
+            "`/broadcast` - Broadcast a message to all chats (reply).\n"
+            "`/adminstats` - Get a detailed bot health report.\n"
+            "`/show_chats` - List all chats I'm in (sent privately).\n"
+            "`/s_ban <chat> <user>` - Ban a user with my rights.\n"
+            "`/s_unban <chat> <user>` - Unban a user with my rights.\n"
+            "`/s_send <chat> <msg>` - Send a message to any chat.\n"
+            "`/forcedynamic` - Reset AI model to dynamic mode.\n"
+            "`/forcegemma` - Force AI model to Gemma-only.\n"
+            "`/forcedeepseek` - Force AI model to DeepSeek-only.\n"
+            "`/addsudo <id>` | `/removesudo <id>` - Manage Sudo users.\n"
+        )
+        help_text += sudo_help_text
+        
+    help_text += "\n\n✨ by Gopu ✨"
+    
+    await update.message.reply_text(help_text, parse_mode='Markdown', disable_web_page_preview=True)
+    logger.info(f"[{update.effective_chat.id}] /help command used.")
+
+
+# --- ABOUT Command ---
+async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    about_text = (
+        "❤️ **About Pihu** ❤️\n\n" # Pihu
+        "I am Pihu, an AI assistant . My purpose is to chat with you and provide answers to your questions.\n\n" # Pihu
+        "My intelligence comes from a family of large language models, allowing me to provide helpful and accurate responses.\n\n"
+        "✨ **Owner**: Gopu\n"
+        "✨ **Version**: 3.1 (Custom Welcome Update)\n\n" # Version updated
+    )
+    await update.message.reply_text(about_text, parse_mode='Markdown')
+    logger.info(f"[{update.effective_chat.id}] /about command used.")
+
+# --- Error Handler ---
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a message to the admin."""
+    logger.error("An error occurred:", exc_info=context.error)
+    
+    if BROADCAST_ADMIN_ID:
+        try:
+            error_message = f"An error occurred in the bot:\n\n`{traceback.format_exc()}`"
+            # Trim message if too long
+            if len(error_message) > 4096:
+                error_message = error_message[:4000] + "\n\n... (message truncated)"
+            await context.bot.send_message(
+                chat_id=BROADCAST_ADMIN_ID,
+                text=error_message,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"Failed to send error notification to admin: {e}")
+
+# --- Sudo Commands ---
+async def add_sudo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if user_id != BROADCAST_ADMIN_ID:
+        await context.bot.send_message(chat_id=chat_id, text="Sorry, this command is for the bot owner only.")
+        return
+    if not context.args or not context.args[0].isdigit():
+        await context.bot.send_message(chat_id=chat_id, text="Please provide a valid user ID. Usage: `/addsudo <user_id>`")
+        return
+    target_user_id = context.args[0]
+    if target_user_id in sudo_users:
+        await context.bot.send_message(chat_id=chat_id, text=f"User `{target_user_id}` is already a sudo user.")
+        return
+    sudo_users.add(target_user_id)
+    save_sudo_users()
+    await context.bot.send_message(chat_id=chat_id, text=f"User `{target_user_id}` has been added as a sudo user.")
+    logger.info(f"[{chat_id}] Admin {user_id} added sudo user {target_user_id}")
+    
+async def remove_sudo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if user_id != BROADCAST_ADMIN_ID:
+        await context.bot.send_message(chat_id=chat_id, text="Sorry, this command is for the bot owner only.")
+        return
+    if not context.args or not context.args[0].isdigit():
+        await context.bot.send_message(chat_id=chat_id, text="Please provide a valid user ID. Usage: `/removesudo <user_id>`")
+        return
+    target_user_id = context.args[0]
+    if target_user_id not in sudo_users:
+        await context.bot.send_message(chat_id=chat_id, text=f"User `{target_user_id}` is not a sudo user.")
+        return
+    sudo_users.remove(target_user_id)
+    save_sudo_users()
+    await context.bot.send_message(chat_id=chat_id, text=f"User `{target_user_id}` has been removed as a sudo user.")
+    logger.info(f"[{chat_id}] Admin {user_id} removed sudo user {target_user_id}")
+
+# --- Check for sudo status ---
+def check_sudo_wrapper(handler):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = str(update.effective_user.id)
+        # Check if user is the main owner OR a listed sudo user
+        if user_id == str(BROADCAST_ADMIN_ID) or user_id in sudo_users:
+            await handler(update, context)
+        else:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="Sorry, this command is restricted to sudo users only.")
+            logger.warning(f"Unauthorized access to restricted command by user {user_id} in chat {update.effective_chat.id}")
+    return wrapper
+
+# --- Main function ---
+def main() -> None:
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # --- NEW: Load all data from sheets on startup ---
+    # This call initializes all sheet variables (google_sheet, sudo_sheet, welcome_sheet)
+    #client, error = get_google_sheet_connection()
+    #if not client:
+        #logger.critical(f"CRITICAL: Failed to connect to Google Sheets on startup. {error}")
+        # Depending on severity, you might want to exit
+        # return 
+    
+    #load_known_users()
+    #load_sudo_users()
+    #load_welcome_settings() # NEW: Load custom welcomes into cache
+    
+    # General Commands
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("about", about_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("id", get_id_command))
+    
+    # Media & AI Commands
+    application.add_handler(CommandHandler("tr", translate_command))
+    application.add_handler(CommandHandler("gen", gen_command))
+    application.add_handler(CommandHandler("img", img_command))
+    application.add_handler(CommandHandler("lyrics", lyrics_command))
+    application.add_handler(CommandHandler("youtube", youtube_command))
+
+    # Utility Commands (NEW)
+    application.add_handler(CommandHandler("weather", weather_command))
+    application.add_handler(CommandHandler("crypto", crypto_command))
+    application.add_handler(CommandHandler("define", define_command))
+    application.add_handler(CommandHandler("qr", qr_command))
+    application.add_handler(CommandHandler("shorten", shorten_command))
+    application.add_handler(CommandHandler("ud", ud_command))
+    application.add_handler(CommandHandler("paste", paste_command))
+
+    # Fun & Game Commands
+    application.add_handler(CommandHandler("couple", couple_command))
+    application.add_handler(CommandHandler("truth", truth_command))
+    application.add_handler(CommandHandler("dare", dare_command))
+    application.add_handler(CommandHandler("slap", slap_command))
+    application.add_handler(CommandHandler("roll", roll_command))
+    application.add_handler(CommandHandler("coinflip", coinflip_command))
+    application.add_handler(CommandHandler("startgame", start_game_command))
+    application.add_handler(CommandHandler("stopgame", stop_game_command))
+    # Fun Commands (NEW)
+    application.add_handler(CommandHandler("meme", meme_command))
+    application.add_handler(CommandHandler("joke", joke_command))
+    application.add_handler(CommandHandler("quote", quote_command))
+    application.add_handler(CommandHandler("roast", roast_command))
+    application.add_handler(CommandHandler("rate", rate_command))
+    application.add_handler(CommandHandler("catfact", catfact_command))
+    application.add_handler(CommandHandler("dogfact", dogfact_command))
+    application.add_handler(CommandHandler("advice", advice_command))
+    
+
+    # --- Admin Commands (Group Admin required) ---
+    application.add_handler(CommandHandler("on", on_command))
+    application.add_handler(CommandHandler("off", off_command))
+    application.add_handler(CommandHandler("reset", reset_command))
+    application.add_handler(CommandHandler("reboot", reboot_command))
+    application.add_handler(CommandHandler("ban", ban_user))
+    application.add_handler(CommandHandler("kick", kick_user))
+    application.add_handler(CommandHandler("mute", mute_user))
+    application.add_handler(CommandHandler("unban", unban_user))
+    application.add_handler(CommandHandler("unmute", unmute_user))
+    
+    # --- NEW: Custom Welcome Admin Commands ---
+   # application.add_handler(CommandHandler("setwelcome", set_welcome_message_command))
+    #application.add_handler(CommandHandler("setwelcomemedia", set_welcome_media_command))
+  #  application.add_handler(CommandHandler("resetwelcome", reset_welcome_command))
+    
+    # Sudo-Only Commands (Sudo user or Owner required)
+    application.add_handler(CommandHandler("poweron", check_sudo_wrapper(poweron_command)))
+    application.add_handler(CommandHandler("poweroff", check_sudo_wrapper(poweroff_command)))
+    application.add_handler(CommandHandler("broadcast", check_sudo_wrapper(broadcast_command)))
+    application.add_handler(CommandHandler("get_photo_id", check_sudo_wrapper(get_photo_id)))
+    application.add_handler(CommandHandler("adminstats", check_sudo_wrapper(admin_stats_command)))
+    application.add_handler(CommandHandler("forcegemma", check_sudo_wrapper(force_gemma_command)))
+    application.add_handler(CommandHandler("forcedynamic", check_sudo_wrapper(force_dynamic_command)))
+    application.add_handler(CommandHandler("forcedeepseek", check_sudo_wrapper(force_deepseek_command)))
+    application.add_handler(CommandHandler("show_chats", check_sudo_wrapper(show_chats_command)))
+    application.add_handler(CommandHandler("s_ban", check_sudo_wrapper(sudo_ban_user)))
+    application.add_handler(CommandHandler("s_unban", check_sudo_wrapper(sudo_unban_user)))
+    application.add_handler(CommandHandler("s_send", check_sudo_wrapper(sudo_send_message)))
+
+    # Owner-Only Sudo Management Commands (BROADCAST_ADMIN_ID required)
+    application.add_handler(CommandHandler("addsudo", add_sudo_command))
+    application.add_handler(CommandHandler("removesudo", remove_sudo_command))
+
+    # --- Message handlers ---
+    # ✨ ADDED THE NEW WELCOME HANDLER HERE ✨
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
+    
+    # --- FIX: Added filters.EDITED_MESSAGE to handle edits ---
+    application.add_handler(MessageHandler(
+        (filters.TEXT | filters.CAPTION) & (~filters.UpdateType.EDITED_MESSAGE), 
+        process_message
+    ))
+    application.add_handler(MessageHandler(
+        (filters.UpdateType.EDITED_MESSAGE & (filters.TEXT | filters.CAPTION)), 
+        process_message
+    ))
+    
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    
+    # --- NEW: Add the CallbackQueryHandler for the game ---
+    # This will catch all button presses and send them to game.py
+    #application.add_handler(CallbackQueryHandler(game.handle_game_callback))
+
+    application.add_error_handler(error_handler)
+    
+    if WEBHOOK_URL:
+        PORT = int(os.getenv("PORT", "8000"))
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TELEGRAM_BOT_TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}"
+        )
+        logger.info(f"Bot started with webhook on port {PORT}")
+    else:
+        logger.info("Starting bot in polling mode.")
+        application.run_polling()
+
+if __name__ == '__main__':
+    main()
+    
