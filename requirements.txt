@@ -1,0 +1,14 @@
+python-telegram-bot[webhooks]>=22.3
+google-generativeai
+requests
+python-dotenv
+pytz
+psutil
+lyricsgenius
+uuid
+asyncio
+SpeechRecognition
+pydub
+yt-dlp==2024.07.25
+asyncpg 
+aiohttp
